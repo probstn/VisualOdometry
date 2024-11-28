@@ -1,13 +1,6 @@
 import cv2
 import numpy as np
-import glob
-import os
 import matplotlib.pyplot as plt
-
-# Function to load images from the specified directory
-def load_images_from_folder(folder):
-    images = sorted(glob.glob(os.path.join(folder, '*.png')))
-    return [cv2.imread(img, cv2.IMREAD_GRAYSCALE) for img in images]
 
 # Feature matching function
 def feature_matching(img1, img2, detector):
@@ -31,11 +24,12 @@ def feature_matching(img1, img2, detector):
 
     return pts1, pts2, good_matches
 
-# Main visual odometry function
-def visual_odometry(image_folder):
-    images = load_images_from_folder(image_folder)
-    if len(images) < 2:
-        print("Not enough images for visual odometry.")
+# Real-time visual odometry
+def real_time_visual_odometry(camera_index=1):
+    # Initialize video capture
+    cap = cv2.VideoCapture(camera_index)
+    if not cap.isOpened():
+        print("Error: Could not open video stream.")
         return
 
     # Initialize feature detector (ORB/SIFT)
@@ -50,40 +44,61 @@ def visual_odometry(image_folder):
     trajectory = []
     R, t = np.eye(3), np.zeros((3, 1))
 
-    # Loop through image pairs
-    for i in range(300):#len(images) - 1):
-        img1, img2 = images[i], images[i + 1]
+    # Variables to store previous frame
+    prev_frame = None
 
-        # Feature matching
-        pts1, pts2, matches = feature_matching(img1, img2, detector)
+    #sleep
+    import time
+    time.sleep(2)
 
-        # Estimate essential matrix
-        E, mask = cv2.findEssentialMat(pts2, pts1, K, method=cv2.RANSAC, prob=0.999, threshold=1.0)
-        _, R1, t1, mask_pose = cv2.recoverPose(E, pts2, pts1, K)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Error: Could not read frame.")
+            break
 
-        # Update pose
-        R = R @ R1
-        t = t + R @ t1
+        # Convert to grayscale
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # Save trajectory
-        trajectory.append(t.ravel())
+        if prev_frame is not None:
+            # Feature matching between consecutive frames
+            pts1, pts2, matches = feature_matching(prev_frame, gray_frame, detector)
 
-        # Draw matches (optional)
-        match_img = cv2.drawMatches(img1, detector.detect(img1, None), img2, detector.detect(img2, None), matches, None)
-        cv2.imshow("Matches", match_img)
+            # Estimate essential matrix
+            E, mask = cv2.findEssentialMat(pts2, pts1, K, method=cv2.RANSAC, prob=0.999, threshold=1.0)
+            _, R1, t1, mask_pose = cv2.recoverPose(E, pts2, pts1, K)
+
+            # Update pose
+            R = R @ R1
+            t = t + R @ t1
+
+            # Save trajectory
+            trajectory.append(t.ravel())
+
+            # Draw matches
+            match_img = cv2.drawMatches(prev_frame, detector.detect(prev_frame, None),
+                                        gray_frame, detector.detect(gray_frame, None),
+                                        matches, None)
+            cv2.imshow("Matches", match_img)
+
+        # Update previous frame
+        prev_frame = gray_frame
+
+        # Break loop on key press
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
     # Visualize trajectory
-    trajectory = np.array(trajectory)
-    plt.plot(trajectory[:, 0], trajectory[:, 2], marker='o')
-    plt.title("Visual Odometry Trajectory")
-    plt.xlabel("X")
-    plt.ylabel("Z")
-    plt.show()
+    if trajectory:
+        trajectory = np.array(trajectory)
+        plt.plot(trajectory[:, 0], trajectory[:, 2], marker='o')
+        plt.title("Visual Odometry Trajectory")
+        plt.xlabel("X")
+        plt.ylabel("Z")
+        plt.show()
 
+    cap.release()
     cv2.destroyAllWindows()
 
-# Run visual odometry
-image_folder = './image_0'  # Specify the path to your image sequence
-visual_odometry(image_folder)
+# Run real-time visual odometry
+real_time_visual_odometry()
