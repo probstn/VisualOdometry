@@ -1,112 +1,89 @@
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
 import glob
+import os
+import matplotlib.pyplot as plt
 
-# Function to compute the essential matrix and camera pose
-def compute_camera_pose(E, K, prev_points, curr_points):
-    """
-    Compute rotation (R) and translation (t) from the essential matrix.
-    """
-    retval, R, t, mask = cv2.recoverPose(E, prev_points, curr_points, cameraMatrix=K)
-    return R, t
+# Function to load images from the specified directory
+def load_images_from_folder(folder):
+    images = sorted(glob.glob(os.path.join(folder, '*.png')))
+    return [cv2.imread(img, cv2.IMREAD_GRAYSCALE) for img in images]
 
-# Folder with images
-image_folder = './image_0/*.png'
-# Get list of images from the folder
-image_files = sorted(glob.glob(image_folder))
+# Feature matching function
+def feature_matching(img1, img2, detector):
+    kp1, des1 = detector.detectAndCompute(img1, None)
+    kp2, des2 = detector.detectAndCompute(img2, None)
 
-# Camera intrinsic matrix for KITTI dataset (monocular)
-K = np.array([[721.5377, 0, 609.5593],
-              [0, 721.5377, 172.8540],
-              [0, 0, 1]])
+    # Match descriptors using FLANN
+    index_params = dict(algorithm=1, trees=5)  # FLANN_INDEX_KDTREE for SIFT
+    search_params = dict(checks=50)
+    flann = cv2.FlannBasedMatcher(index_params, search_params)
+    matches = flann.knnMatch(des1, des2, k=2)
 
-# Initialize ORB detector with 2000 keypoints
-orb = cv2.ORB_create(nfeatures=5000)
+    # Filter matches using Lowe's ratio test
+    good_matches = []
+    for m, n in matches:
+        if m.distance < 0.7 * n.distance:
+            good_matches.append(m)
 
-# Parameters for Lucas-Kanade optical flow
-lk_params = dict(winSize=(15, 15), maxLevel=2, criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+    pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
+    pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
 
-# Initialize variables
-image1 = None
-points1 = None
-trajectory = [[0, 0]]  # Stores camera positions
-R_total = np.eye(3)    # Initial rotation (identity matrix)
-t_total = np.zeros((3, 1))  # Initial translation (zero vector)
+    return pts1, pts2, good_matches
 
-# Setup live trajectory plot
-plt.ion()
-fig, ax = plt.subplots()
-trajectory_plot, = ax.plot([], [], '-o', label="Camera trajectory")
-ax.set_xlim(-250, 250)
-ax.set_ylim(-250, 50)
-ax.set_xlabel("X-axis")
-ax.set_ylabel("Z-axis")
-ax.set_title("Live Visual Odometry - Trajectory")
-ax.legend()
-plt.grid()
+# Main visual odometry function
+def visual_odometry(image_folder):
+    images = load_images_from_folder(image_folder)
+    if len(images) < 2:
+        print("Not enough images for visual odometry.")
+        return
 
+    # Initialize feature detector (ORB/SIFT)
+    detector = cv2.SIFT_create()
 
+    # Intrinsic camera matrix (modify for your camera setup)
+    K = np.array([[718.856, 0, 607.1928],
+                  [0, 718.856, 185.2157],
+                  [0, 0, 1]])
 
-# Loop through all the images
-for image_path in image_files:
-    # Read the current image
-    image2 = cv2.imread(image_path)
-    
-    if image2 is None:
-        continue
+    # Initialize pose and trajectory
+    trajectory = []
+    R, t = np.eye(3), np.zeros((3, 1))
 
-    # Convert the images to grayscale
-    image2_gray = cv2.cvtColor(image2, cv2.COLOR_BGR2GRAY)
-    
-    # Detect keypoints and compute the descriptors
-    if image1 is None:
-        image1 = image2_gray
-        keypoints1 = orb.detect(image1, None)
-        points1 = cv2.KeyPoint_convert(keypoints1)
-        continue
+    # Loop through image pairs
+    for i in range(300):#len(images) - 1):
+        img1, img2 = images[i], images[i + 1]
 
-    # If tracking points fall below the threshold, recompute ORB keypoints
-    if points1 is None or len(points1) < 2500:
-        keypoints1 = orb.detect(image1, None)
-        points1 = cv2.KeyPoint_convert(keypoints1)
+        # Feature matching
+        pts1, pts2, matches = feature_matching(img1, img2, detector)
 
-    # Calculate optical flow
-    points2, status, err = cv2.calcOpticalFlowPyrLK(image1, image2_gray, points1, None, **lk_params)
+        # Estimate essential matrix
+        E, mask = cv2.findEssentialMat(pts2, pts1, K, method=cv2.RANSAC, prob=0.999, threshold=1.0)
+        _, R1, t1, mask_pose = cv2.recoverPose(E, pts2, pts1, K)
 
-    # Select successfully tracked points
-    good_new = points2[status.ravel() == 1]
-    good_old = points1[status.ravel() == 1]
+        # Update pose
+        R = R @ R1
+        t = t + R @ t1
 
-    # Compute the essential matrix
-    if len(good_new) >= 8:  # Minimum points needed for E estimation
-        E, mask = cv2.findEssentialMat(good_new, good_old, K, method=cv2.RANSAC, prob=0.999, threshold=2)
-        R, t = compute_camera_pose(E, K, good_old, good_new)
+        # Save trajectory
+        trajectory.append(t.ravel())
 
-        # Update the global pose
-        R_total = R @ R_total
-        t_total += R_total @ t
+        # Draw matches (optional)
+        match_img = cv2.drawMatches(img1, detector.detect(img1, None), img2, detector.detect(img2, None), matches, None)
+        cv2.imshow("Matches", match_img)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-        # Add the current position to the trajectory
-        trajectory.append([t_total[0, 0], t_total[2, 0]])
+    # Visualize trajectory
+    trajectory = np.array(trajectory)
+    plt.plot(trajectory[:, 0], trajectory[:, 2], marker='o')
+    plt.title("Visual Odometry Trajectory")
+    plt.xlabel("X")
+    plt.ylabel("Z")
+    plt.show()
 
-        # Update the live trajectory plot
-        trajectory_array = np.array(trajectory)
-        trajectory_plot.set_data(trajectory_array[:, 0], trajectory_array[:, 1])
-        plt.pause(0.01)
+    cv2.destroyAllWindows()
 
-    # Draw the tracks
-    for i, (new, old) in enumerate(zip(good_new, good_old)):
-        a, b = map(int, new.ravel())  # Cast to integers
-        c, d = map(int, old.ravel())  # Cast to integers
-        image2 = cv2.line(image2, (a, b), (c, d), (0, 255, 0), 2)
-        image2 = cv2.circle(image2, (a, b), 5, (0, 0, 255), -1)
-
-    # Display the image with the optical flow tracks
-    cv2.imshow('Optical Flow', image2)
-
-    # Update points and previous image for the next frame
-    points1 = good_new.reshape(-1, 1, 2)
-    image1 = image2_gray.copy()
-
-cv2.destroyAllWindows()
+# Run visual odometry
+image_folder = './image_0'  # Specify the path to your image sequence
+visual_odometry(image_folder)
